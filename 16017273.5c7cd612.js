@@ -1,1 +1,0 @@
-(window.webpackJsonp=window.webpackJsonp||[]).push([[5],{73:function(a){a.exports=JSON.parse('{"allTagsPath":"/CacheLib/blog/tags","slug":"hello","name":"hello","count":2,"permalink":"/CacheLib/blog/tags/hello"}')}}]);
