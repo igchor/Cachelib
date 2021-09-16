@@ -25,6 +25,7 @@
 #include <string>
 
 #include "cachelib/allocator/Cache.h"
+#include "cachelib/allocator/CacheMemoryTierConfig.h"
 #include "cachelib/allocator/MM2Q.h"
 #include "cachelib/allocator/MemoryMonitor.h"
 #include "cachelib/allocator/NvmAdmissionPolicy.h"
@@ -179,6 +180,14 @@ class CacheAllocatorConfig {
   // @throw std::invalid_argument if called without enabling
   // cachePersistence()
   CacheAllocatorConfig& usePosixForShm();
+
+  // Enables heterogenous memory cache. Accepts vector of shared ptrs
+  // to MemoryTierCacheConfig. Each vector element describes configuration
+  // for a single memory cache tier.
+  // @throw std::invalid_argument if config is not an instance of
+  // DramCacheConfig, FsDaxCacheConfig or NumaNodeCacheConfig
+  CacheAllocatorConfig& enableHeterogenousMemoryCache(
+      std::vector<NumaNodeCacheConfig> configs);
 
   // This turns on a background worker that periodically scans through the
   // access container and look for expired items and remove them.
@@ -575,6 +584,9 @@ class CacheAllocatorConfig {
   // cache.
   uint64_t nvmAdmissionMinTTL{0};
 
+  // Configuration for heterogenous memory cache.
+  std::vector<MemoryTierCacheConfig> heterogenousMemoryConfig;
+
   friend CacheT;
 
  private:
@@ -813,6 +825,13 @@ CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::enableItemReaperInBackground(
     std::chrono::milliseconds interval, util::Throttler::Config config) {
   reaperInterval = interval;
   reaperConfig = config;
+  return *this;
+}
+
+template <typename T>
+CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::enableHeterogenousMemoryCache(
+      std::vector<MemoryTierCacheConfig> config) {
+  heterogenousMemoryConfig = config;
   return *this;
 }
 
