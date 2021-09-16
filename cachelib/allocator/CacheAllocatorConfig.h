@@ -25,6 +25,7 @@
 #include <string>
 
 #include "cachelib/allocator/Cache.h"
+#include "cachelib/allocator/CacheMemoryTierConfig.h"
 #include "cachelib/allocator/MM2Q.h"
 #include "cachelib/allocator/MemoryMonitor.h"
 #include "cachelib/allocator/NvmAdmissionPolicy.h"
@@ -172,13 +173,43 @@ class CacheAllocatorConfig {
   // This allows cache to be persisted across restarts. One example use case is
   // to preserve the cache when releasing a new version of your service. Refer
   // to our user guide for how to set up cache persistence.
+  // TODO: get rid of baseAddr
   CacheAllocatorConfig& enableCachePersistence(std::string directory,
                                                void* baseAddr = nullptr);
 
-  // uses posix shm segments instead of the default sys-v shm segments.
-  // @throw std::invalid_argument if called without enabling
+  // (Deprecated) uses posix shm segments instead of the default sys-v shm
+  // segments. @throw std::invalid_argument if called without enabling
   // cachePersistence()
   CacheAllocatorConfig& usePosixForShm();
+
+  // Configures cache memory tiers. Accepts vector of MemoryTierCacheConfig.
+  // Each vector element describes configuration for a single memory cache tier.
+  //
+  // Current configuration for dram:
+  // auto cfg = CacheAllocatorConfig{}
+  //     .setCacheSize(1 * 1024 * 1024 * 1024)
+  //     .enableCachePersistence("/var/metadataDir")
+  //     .usePosixForShm() // optional
+  //     });
+  //
+  // Example configuration for pmem + dram with MemoryTierCacheConfig:
+  // auto cfg = CacheAllocatorConfig{}
+  //     .setCacheSize(1 * 1024 * 1024 * 1024)
+  //     .enableCachePersistence("/var/metadataDir")
+  //     .configureMemoryTiers({
+  //         MemoryTierCacheConfig::fromAnonymousMemory() // or MemoryTierCacheConfig::fromDirectory("/dev/shm")
+  //         MemoryTierCacheConfig::fromDirectory("/mnt/pmem1").setRatio(1.5)
+  //     });
+  //
+  // Example configuration for dram only with MemoryTierCacheConfig:
+  // auto cfg = CacheAllocatorConfig{}
+  //     .setCacheSize(1 * 1024 * 1024 * 1024)
+  //     .enableCachePersistence("/var/metadataDir")
+  //     .configureMemoryTiers({
+  //         MemoryTierCacheConfig::fromAnonymousMemory() // or MemoryTierCacheConfig::fromDirectory("/dev/shm")
+  //     });
+  CacheAllocatorConfig& configureMemoryTiers(
+      std::vector<MemoryTierCacheConfig> configs);
 
   // This turns on a background worker that periodically scans through the
   // access container and look for expired items and remove them.
@@ -575,6 +606,9 @@ class CacheAllocatorConfig {
   // cache.
   uint64_t nvmAdmissionMinTTL{0};
 
+  // Configuration for memory tiers.
+  std::vector<MemoryTierCacheConfig> memoryTierConfigs;
+
   friend CacheT;
 
  private:
@@ -813,6 +847,13 @@ CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::enableItemReaperInBackground(
     std::chrono::milliseconds interval, util::Throttler::Config config) {
   reaperInterval = interval;
   reaperConfig = config;
+  return *this;
+}
+
+template <typename T>
+CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::configureMemoryTiers(
+      std::vector<MemoryTierCacheConfig> config) {
+  memoryTierConfigs = config;
   return *this;
 }
 
