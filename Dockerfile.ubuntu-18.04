@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1
+FROM ubuntu:18.04
+COPY . /cachelib
+ENV PATH="/cachelib/opt/cachelib/bin/:${PATH}"
+RUN apt-get update && apt-get install -y \
+    sudo \
+    git \
+ && rm -rf /var/lib/apt/lists/*
+RUN cd cachelib \
+ && ./contrib/build.sh -j -v

@@ -1,0 +1,7 @@
+# syntax=docker/dockerfile:1
+FROM centos:8.3.2011
+COPY . /cachelib
+ENV PATH="/cachelib/opt/cachelib/bin/:${PATH}"
+RUN dnf -y update && dnf -y install sudo git && dnf clean all
+RUN cd cachelib \
+ && ./contrib/build.sh -j -v
