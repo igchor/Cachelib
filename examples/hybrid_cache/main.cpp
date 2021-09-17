@@ -33,8 +33,8 @@ using CacheItemHandle = typename Cache::ItemHandle;
 std::unique_ptr<Cache> gCache_;
 cachelib::PoolId defaultPool_;
 
-  const std::string cacheDir_("/tmp/persistence_test" + folly::to<std::string>(folly::Random::rand32()));
-  const std::string cacheFile_(cacheDir_ + folly::to<std::string>(folly::Random::rand32()));
+const std::string cacheDir_("/tmp/persistence_test" + folly::to<std::string>(folly::Random::rand32()));
+const std::string cacheFile_(cacheDir_ + folly::to<std::string>(folly::Random::rand32()));
 
 inline Cache::NvmCacheConfig createNvmBasicConfig() {
   std::filesystem::create_directories(cacheDir_);
