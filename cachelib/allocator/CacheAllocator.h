@@ -1672,6 +1672,20 @@ class CacheAllocator : public CacheBase {
   folly::Range<ChainedItemIter> viewAsChainedAllocsRange(
       const Item& parent) const;
 
+  struct MemoryManager {
+    // XXX - base class for ShmManager?
+  };
+
+  struct FsDaxManager : public MemoryManager {
+    // TODO
+  };
+
+  struct NumaManager : public MemoryManager {
+    // TODO
+  };
+
+  std::vector<std::unique_ptr<MemoryManager>> createMemoryManagers();
+
   // BEGIN private members
 
   // Whether the memory allocator for this cache allocator was created on shared
@@ -1687,6 +1701,8 @@ class CacheAllocator : public CacheBase {
   std::unique_ptr<TempShmMapping> tempShm_;
 
   std::unique_ptr<ShmManager> shmManager_;
+
+  std::vector<std::unique_ptr<MemoryManager>> memoryManagers_;
 
   // Deserialize data to restore cache allocator. Used only while attaching to
   // existing shared memory.

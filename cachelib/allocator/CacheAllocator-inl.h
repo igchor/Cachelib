@@ -27,6 +27,7 @@ CacheAllocator<CacheTrait>::CacheAllocator(Config config)
       config_(config.validate()),
       tempShm_(isOnShm_ ? std::make_unique<TempShmMapping>(config_.size)
                         : nullptr),
+      memoryManagers_(createMemoryManagers())
       allocator_(isOnShm_ ? std::make_unique<MemoryAllocator>(
                                 getAllocatorConfig(config_),
                                 tempShm_->getAddr(),
@@ -272,6 +273,27 @@ std::unique_ptr<Deserializer> CacheAllocator<CacheTrait>::createDeserializer() {
   return std::make_unique<Deserializer>(
       reinterpret_cast<uint8_t*>(infoAddr.addr),
       reinterpret_cast<uint8_t*>(infoAddr.addr) + infoAddr.size);
+}
+
+template <typename CacheTrait>
+std::vector<std::unique_ptr<MemoryManager>> CacheAllocator<CacheTrait>::createMemoryManagers() {
+  std::vector<std::unique_ptr<MemoryManager>> mm;
+
+  for (auto &tierConfig : config.heterogenousMemoryConfig) {
+    if (tierConfig.holds_alternative<DramCacheManager>()) {
+      mm.emplace_back(tempShm_ ? std::move(tempShm_) : std::move(shmManager_));
+      // TODO - get rid of having tempShm_ and shmManager_ variables,
+      // keep all in this vector
+    } else if (tierConfig.holds_alternative<FsDaxCacheConfig>()) {
+      mm.emplace_back(std::make_unique<FsDaxManager>(tierConfig.get<FsDaxCacheConfig>.directory));
+    } else if (tierConfig.holds_alternative<NumaNodeCacheConfig>()) {
+      mm.emplace_back(std::make_unique<NumaManager>(tierConfig.get<NumaNodeCacheConfig>.directory));
+    } else {
+      throw std::invalid_argument("Unsupported MemoryTierCacheConfig type");
+    }
+  }
+
+  return mm;
 }
 
 template <typename CacheTrait>
