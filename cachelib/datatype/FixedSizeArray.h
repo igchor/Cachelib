@@ -27,7 +27,7 @@ namespace cachelib {
 namespace detail {
 // @param T must be a POD like type
 template <typename T>
-class FOLLY_PACK_ATTR FixedSizeArrayLayout {
+class FixedSizeArrayLayout {
  public:
   // Compute the storage required for the number of elements
   static uint32_t computeStorageSize(uint32_t numElements) {

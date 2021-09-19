@@ -204,7 +204,7 @@ TEST(Device, MaxWriteSize) {
 
   int deviceSize = 16 * 1024;
   int ioAlignSize = 1024;
-  int fd = open(filePath.c_str(), O_RDWR | O_CREAT);
+  int fd = open(filePath.c_str(), O_RDWR | O_CREAT, 0600);
   folly::File f = folly::File(fd);
   auto device = createDirectIoFileDevice(
       std::move(f), deviceSize, ioAlignSize, nullptr, 1024);

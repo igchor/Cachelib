@@ -1963,7 +1963,7 @@ TEST(BlockCache, PersistRecoverWithInMemBuffers) {
 
   int deviceSize = 16 * 1024 * 1024;
   int ioAlignSize = 4096;
-  int fd = open(filePath.c_str(), O_RDWR | O_CREAT);
+  int fd = open(filePath.c_str(), O_RDWR | O_CREAT, 0600);
   folly::File f = folly::File(fd);
   auto device = createDirectIoFileDevice(std::move(f), deviceSize, ioAlignSize,
                                          nullptr, 0);
@@ -1992,7 +1992,7 @@ TEST(BlockCache, PersistRecoverWithInMemBuffers) {
 
   driver->persist();
 
-  int newFd = open(filePath.c_str(), O_RDWR | O_CREAT);
+  int newFd = open(filePath.c_str(), O_RDWR | O_CREAT, 0600);
   folly::File newF = folly::File(newFd);
   auto newDevice = createDirectIoFileDevice(std::move(newF), deviceSize,
                                             ioAlignSize, nullptr, 0);
