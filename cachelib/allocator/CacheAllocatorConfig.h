@@ -810,10 +810,10 @@ CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::enableCachePersistence(
 
 template <typename T>
 CacheAllocatorConfig<T>& CacheAllocatorConfig<T>::usePosixForShm() {
-  if (cacheDir.empty()) {
-    throw std::invalid_argument(
-        "Posix shm can be set only when cache persistence is enabled");
-  }
+  // if (cacheDir.empty()) {
+  //   throw std::invalid_argument(
+  //       "Posix shm can be set only when cache persistence is enabled");
+  // }
   usePosixShm = true;
   return *this;
 }

@@ -154,6 +154,7 @@ class CacheAllocator : public CacheBase {
   using ChainedItemIter = CacheChainedItemIterator<CacheT>;
   using Key = typename Item::Key;
   using PoolIds = std::set<PoolId>;
+  using TierId = int8_t;
 
   using EventTracker = EventInterface<Key>;
 
@@ -920,7 +921,7 @@ class CacheAllocator : public CacheBase {
   GlobalCacheStats getGlobalCacheStats() const override final;
 
   // return cache's memory usage stats
-  CacheMemoryStats getCacheMemoryStats() const override final;
+  CacheMemoryStats getCacheMemoryStats(TierId tid) const override final;
 
   // return the nvm cache stats map
   std::unordered_map<std::string, double> getNvmCacheStatsMap()
@@ -1112,12 +1113,17 @@ class CacheAllocator : public CacheBase {
     return hdl.getItemWaitContext();
   }
 
+  // TODO: come up with some reasonable number
+  static constexpr unsigned kMaxTiers = 128;
+
   using MMContainerPtr = std::unique_ptr<MMContainer>;
   using MMContainers =
-      std::array<std::array<MMContainerPtr, MemoryAllocator::kMaxClasses>,
-                 MemoryPoolManager::kMaxPools>;
+      std::array<std::array<std::array<MMContainerPtr, MemoryAllocator::kMaxClasses>,
+                 MemoryPoolManager::kMaxPools>, kMaxTiers>;
 
   void createMMContainers(const PoolId pid, MMConfig config);
+
+  TierId getTierId(const Item& item) const;
 
   // acquire the MMContainer corresponding to the the Item's class and pool.
   // if the item is unevictable, return the mm container for unevictable items
@@ -1132,10 +1138,10 @@ class CacheAllocator : public CacheBase {
   // it does not exist.
   //
   // @return pointer to a valid MMContainer that is initialized.
-  MMContainer& getEvictableMMContainer(PoolId pid, ClassId cid) const noexcept;
+  MMContainer& getEvictableMMContainer(TierId tid, PoolId pid, ClassId cid) const noexcept;
 
   // same as above, but return the unevictable mm container
-  MMContainer& getUnevictableMMContainer(PoolId pid,
+  MMContainer& getUnevictableMMContainer(TierId tid, PoolId pid,
                                          ClassId cid) const noexcept;
 
   // create a new cache allocation. The allocation can be initialized
@@ -1375,7 +1381,7 @@ class CacheAllocator : public CacheBase {
   // @param  pid  the id of the pool to look for evictions inside
   // @param  cid  the id of the class to look for evictions inside
   // @return An evicted item or nullptr  if there is no suitable candidate.
-  Item* findEviction(PoolId pid, ClassId cid);
+  Item* findEviction(TierId tid, PoolId pid, ClassId cid);
 
   using EvictionIterator = typename MMContainer::Iterator;
 
@@ -1438,7 +1444,8 @@ class CacheAllocator : public CacheBase {
   // @throw std::invalid_argument if the hint is invalid or if the pid or cid
   //        is invalid.
   // @throw std::runtime_error if fail to release a slab due to internal error
-  void releaseSlab(PoolId pid,
+  void releaseSlab(TierId tid,
+                   PoolId pid,
                    ClassId cid,
                    SlabReleaseMode mode,
                    const void* hint = nullptr) final;
@@ -1466,7 +1473,8 @@ class CacheAllocator : public CacheBase {
   //        also specified. Receiver class id can only be specified if the mode
   //        is set to kRebalance.
   // @throw std::runtime_error if fail to release a slab due to internal error
-  void releaseSlab(PoolId pid,
+  void releaseSlab(TierId tid,
+                   PoolId pid,
                    ClassId victim,
                    ClassId receiver,
                    SlabReleaseMode mode,
@@ -1588,8 +1596,8 @@ class CacheAllocator : public CacheBase {
                   std::unique_ptr<T>& worker,
                   std::chrono::seconds timeout = std::chrono::seconds{0});
 
-  std::unique_ptr<MemoryAllocator> createNewMemoryAllocator();
-  std::unique_ptr<MemoryAllocator> restoreMemoryAllocator();
+  std::unique_ptr<MemoryAllocator> createNewMemoryAllocator(TierId tid);
+  std::unique_ptr<MemoryAllocator> restoreMemoryAllocator(TierId tid);
   std::unique_ptr<CCacheManager> restoreCCacheManager();
 
   PoolIds filterCompactCachePools(const PoolIds& poolIds) const;
@@ -1679,6 +1687,8 @@ class CacheAllocator : public CacheBase {
 
   // BEGIN private members
 
+  const unsigned numTiers = 1; // TODO - set from config
+
   // Whether the memory allocator for this cache allocator was created on shared
   // memory. The hash table, chained item hash table etc is also created on
   // shared memory except for temporary shared memory mode when they're created
@@ -1703,10 +1713,16 @@ class CacheAllocator : public CacheBase {
   // configs for the access container and the mm container.
   const MMConfig mmConfig_{};
 
+  // the memory allocator for allocating out metada and indexes.
+  std::unique_ptr<MemoryAllocator> dramAllocator_;
+
   // the memory allocator for allocating out of the available memory.
-  std::unique_ptr<MemoryAllocator> allocator_;
+  // TODO: probably we can change this to array in future, since we
+  // will most likely know the number of tiers in compile time (thanks to CacheTraits)
+  std::vector<std::unique_ptr<MemoryAllocator>> allocator_;
 
   // compact cache allocator manager
+  // TODO: per tier?
   std::unique_ptr<CCacheManager> compactCacheManager_;
 
   // compact cache instances reside here when user "add" or "attach" compact
