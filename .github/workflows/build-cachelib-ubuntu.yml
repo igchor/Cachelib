@@ -5,7 +5,7 @@ on:
 jobs:
   build-cachelib-ubuntu:
     name: "Ubuntu/Latest - Build CacheLib with all dependencies"
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: "update packages"
         run: sudo apt-get update
