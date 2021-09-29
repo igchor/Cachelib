@@ -5,7 +5,7 @@ on:
 jobs:
   build-cachelib-debian-10:
     name: "Debian/Buster - Build CacheLib with all dependencies"
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     # Docker container image name
     container: "debian:buster-slim"
     steps:
