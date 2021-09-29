@@ -5,7 +5,7 @@ on:
 jobs:
   build-cachelib-centos8-latest:
     name: "CentOS/latest - Build CacheLib with all dependencies"
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     # Docker container image name
     container: "centos:latest"
     steps:
