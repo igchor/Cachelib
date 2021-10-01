@@ -29,6 +29,8 @@ jobs:
           env
           echo === gcc -v ===
           gcc -v
+      - name: "configure sudo to keep proxy environment variables"
+        run: echo 'Defaults    env_keep += "HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy"' >> /etc/sudoers
       - name: "checkout sources"
         uses: actions/checkout@v2
       - name: "build CacheLib using build script"
