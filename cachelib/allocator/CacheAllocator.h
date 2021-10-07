@@ -78,6 +78,9 @@
 namespace facebook {
 namespace cachelib {
 
+template <typename AllocatorT>
+class FbInternalRuntimeUpdateWrapper;
+
 namespace cachebench {
 template <typename Allocator>
 class Cache;
@@ -794,6 +797,10 @@ class CacheAllocator : public CacheBase {
   //                                        OOM.
   // @param strategy                        strategy to find an allocation class
   //                                        to release slab from
+  // @param reclaimRateLimitWindowSecs      specifies window in seconds over
+  //                                        which free/resident memory values
+  //                                        are tracked to determine rate of
+  //                                        change to rate limit reclaim
   bool startNewMemMonitor(MemoryMonitor::Mode memMonitorMode,
                           std::chrono::milliseconds interval,
                           unsigned int memAdvisePercentPerIter,
@@ -801,6 +808,15 @@ class CacheAllocator : public CacheBase {
                           unsigned int memLowerLimitGB,
                           unsigned int memUpperLimitGB,
                           unsigned int memMaxAdvisePercent,
+                          std::shared_ptr<RebalanceStrategy> strategy,
+                          std::chrono::seconds reclaimRateLimitWindowSecs);
+  // start memory monitor
+  // @param interval                        the period this worker fires
+  // @param config                          memory monitoring config
+  // @param strategy                        strategy to find an allocation class
+  //                                        to release slab from
+  bool startNewMemMonitor(std::chrono::milliseconds interval,
+                          MemoryMonitor::Config config,
                           std::shared_ptr<RebalanceStrategy> strategy);
 
   // start reaper
@@ -1677,6 +1693,14 @@ class CacheAllocator : public CacheBase {
   folly::Range<ChainedItemIter> viewAsChainedAllocsRange(
       const Item& parent) const;
 
+  // updates the maxWriteRate for DynamicRandomAdmissionPolicy
+  // returns true if update successfully
+  //         false if no AdmissionPolicy is set or it is not DynamicRandom
+  bool updateMaxRateForDynamicRandomAP(uint64_t maxRate) {
+    return nvmCache_ ? nvmCache_->updateMaxRateForDynamicRandomAP(maxRate)
+                     : false;
+  }
+
   // BEGIN private members
 
   // Whether the memory allocator for this cache allocator was created on shared
@@ -1801,6 +1825,7 @@ class CacheAllocator : public CacheBase {
   friend ItemHandle;
   friend ReaperAPIWrapper<CacheT>;
   friend class CacheAPIWrapperForNvm<CacheT>;
+  friend class FbInternalRuntimeUpdateWrapper<CacheT>;
 
   // tests
   friend class facebook::cachelib::tests::NvmCacheTest;

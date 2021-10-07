@@ -84,21 +84,14 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
             *allocator, poolId, folly::to<std::string>(i), kItemSize);
         ASSERT_NE(nullptr, handle);
       }
-      for (unsigned int i = nItems; i < 2 * nItems; ++i) {
-        auto handle = allocator->allocatePermanent_deprecated(
-            poolId, folly::to<std::string>(i), kItemSize);
-        ASSERT_NE(nullptr, handle);
-        allocator->insert(handle);
-      }
 
       auto stats = allocator->getPoolStats(poolId);
       ASSERT_EQ(nItems, stats.numEvictableItems());
-      ASSERT_EQ(nItems, stats.numUnevictableItems());
-      ASSERT_EQ(2 * nItems, stats.numItems());
+      ASSERT_EQ(nItems, stats.numItems());
       ASSERT_EQ(0, stats.numEvictions());
 
       // thread local stats
-      ASSERT_EQ(2 * nItems, stats.numAllocAttempts());
+      ASSERT_EQ(nItems, stats.numAllocAttempts());
 
       if (is2q) {
         // Access items in hot cache
@@ -1609,10 +1602,14 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       const size_t nSlabs = 20;
       config.setCacheSize(nSlabs * Slab::kSize);
       // Enable memory monitoring by setting monitoring mode and interval.
-      config.enableFreeMemoryMonitor(
-          std::chrono::seconds{2}, 1 /* advise pct per iteration */,
-          10 /* max advise pct */, 10 /* lower limit */,
-          10000 /* upper limit */);
+      MemoryMonitor::Config memConfig;
+      memConfig.mode = MemoryMonitor::FreeMemory;
+      memConfig.maxAdvisePercentPerIter = 1;
+      memConfig.maxReclaimPercentPerIter = 1;
+      memConfig.maxAdvisePercent = 10;
+      memConfig.lowerLimitGB = 10;
+      memConfig.upperLimitGB = 20;
+      config.enableMemoryMonitor(std::chrono::seconds{2}, memConfig);
 
       AllocatorT alloc(config);
       ASSERT_TRUE(alloc.isOnShm());
@@ -3918,9 +3915,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
   }
 
   // Check that item is in the expected container.
-  bool findItem(bool /*isUnevictable*/,
-                AllocatorT& allocator,
-                typename AllocatorT::Item* item) {
+  bool findItem(AllocatorT& allocator, typename AllocatorT::Item* item) {
     auto& container = allocator.getMMContainer(*item);
     auto itr = container.getEvictionIterator();
     bool found = false;
@@ -3932,167 +3927,6 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       ++itr;
     }
     return found;
-  }
-
-  void testMixedItems() {
-    const int numSlabs = 2;
-    const size_t kItemSize = 100;
-    const size_t nItems = 10;
-
-    typename AllocatorT::MMConfig mmConfig;
-    mmConfig.lruRefreshTime = 0;
-
-    typename AllocatorT::Config config;
-    config.disableCacheEviction();
-    config.setCacheSize(numSlabs * Slab::kSize);
-    // Disable slab rebalancing
-    config.enablePoolRebalancing(nullptr, std::chrono::seconds{0});
-    AllocatorT allocator(config);
-
-    const size_t numBytes = allocator.getCacheMemoryStats().cacheSize;
-    auto poolId =
-        allocator.addPool("default", numBytes, {} /* allocSizes */, mmConfig);
-    for (unsigned int i = 0; i < nItems; ++i) {
-      auto handle = util::allocateAccessible(
-          allocator, poolId, folly::to<std::string>(i), kItemSize);
-      ASSERT_NE(nullptr, handle);
-      ASSERT_TRUE(!handle->isUnevictable());
-      ASSERT_TRUE(findItem(false, allocator, handle.get()));
-    }
-    for (unsigned int i = nItems; i < 2 * nItems; ++i) {
-      auto handle = allocator.allocatePermanent_deprecated(
-          poolId, folly::to<std::string>(i), kItemSize);
-      ASSERT_NE(nullptr, handle);
-      ASSERT_TRUE(handle->isUnevictable());
-      allocator.insert(handle);
-      ASSERT_TRUE(findItem(true, allocator, handle.get()));
-    }
-
-    for (unsigned int i = 0; i < 2 * nItems; i++) {
-      auto handle = allocator.find(folly::to<std::string>(i));
-      ASSERT_NE(nullptr, handle);
-    }
-  }
-
-  void testUnevictableItems() {
-    const auto moveCb = [](typename AllocatorT::Item& oldItem,
-                           typename AllocatorT::Item& newItem,
-                           typename AllocatorT::Item* /* parentPtr */) {
-      // Simple move callback
-      memcpy(newItem.getWritableMemory(), oldItem.getMemory(),
-             oldItem.getSize());
-    };
-
-    const int numSlabs = 2;
-
-    // Request numSlabs + 1 slabs so that we get numSlabs usable slabs
-    typename AllocatorT::Config config;
-    config.enableMovingOnSlabRelease(moveCb);
-    config.setCacheSize((numSlabs + 1) * Slab::kSize);
-    AllocatorT allocator(config);
-    const size_t numBytes = allocator.getCacheMemoryStats().cacheSize;
-    const size_t kAllocSize = 1024, kItemSize = 512;
-    auto poolId = allocator.addPool("default", numBytes, {kAllocSize});
-    const size_t itemsPerSlab = Slab::kSize / kAllocSize;
-    ASSERT_GT(itemsPerSlab, 0);
-
-    // Fill first slab with 100 unevictable items
-    std::vector<typename AllocatorT::ItemHandle> unevictableItems;
-    for (unsigned int i = 0; i < 100; ++i) {
-      auto key = "unevictable_" + folly::to<std::string>(i);
-      auto handle =
-          allocator.allocatePermanent_deprecated(poolId, key, kItemSize);
-      if (!handle) {
-        break;
-      }
-      ASSERT_TRUE(allocator.insert(handle));
-      unevictableItems.push_back(std::move(handle));
-    }
-
-    // fill the rest with normal items
-    std::vector<typename AllocatorT::ItemHandle> normalItems;
-    for (unsigned int i = 0;; ++i) {
-      auto key = "normal_" + folly::to<std::string>(i);
-      auto handle = allocator.allocate(poolId, key, kItemSize);
-      if (!handle) {
-        break;
-      }
-      ASSERT_TRUE(allocator.insert(handle));
-      normalItems.push_back(std::move(handle));
-    }
-
-    // Lookup all the items by keys.
-    for (unsigned int i = 0; i < unevictableItems.size(); i++) {
-      ASSERT_NE(nullptr, allocator.find(unevictableItems[i]->getKey()));
-    }
-    for (unsigned int i = 0; i < normalItems.size(); i++) {
-      ASSERT_NE(nullptr, allocator.find(normalItems[i]->getKey()));
-    }
-
-    // Releasing second slab is fine since we only have normal items which
-    // can be evicted once we drop all the item handles
-    const void* slabHint = normalItems.back()->getMemory();
-    normalItems.clear();
-    ASSERT_NO_THROW(allocator.releaseSlab(poolId, 0 /* only one AC anyawys */,
-                                          SlabReleaseMode::kRebalance,
-                                          slabHint));
-  }
-
-  void testUnevictableItemsWithMoving() {
-    const auto moveCb = [](typename AllocatorT::Item& oldItem,
-                           typename AllocatorT::Item& newItem,
-                           typename AllocatorT::Item* /* parentPtr */) {
-      // Simple move callback
-      memcpy(newItem.getWritableMemory(), oldItem.getMemory(),
-             oldItem.getSize());
-    };
-
-    const int numSlabs = 3;
-
-    // Request numSlabs + 1 slabs so that we get numSlabs usable slabs
-    typename AllocatorT::Config config;
-    config.enableMovingOnSlabRelease(moveCb);
-    config.setCacheSize((numSlabs + 1) * Slab::kSize);
-    AllocatorT allocator(config);
-    const size_t numBytes = allocator.getCacheMemoryStats().cacheSize;
-    const size_t kAllocSize = 1024, kItemSize = 512;
-    auto poolId = allocator.addPool("default", numBytes, {kAllocSize});
-    const size_t itemsPerSlab = Slab::kSize / kAllocSize;
-    ASSERT_GT(itemsPerSlab, 0);
-
-    // Fill one slab worth of memory with unevictable items
-    for (unsigned int i = 0; i < itemsPerSlab; ++i) {
-      auto key = "unevictable_" + folly::to<std::string>(i);
-      auto handle =
-          allocator.allocatePermanent_deprecated(poolId, key, kItemSize);
-      ASSERT_NE(nullptr, handle);
-      ASSERT_TRUE(allocator.insert(handle));
-    }
-    {
-      auto stats = allocator.getPoolStats(poolId);
-      ASSERT_EQ(itemsPerSlab, stats.numUnevictableItems());
-      ASSERT_EQ(0, stats.numEvictableItems());
-    }
-
-    // Releasing second slab is fine since we only have normal items which
-    // can be evicted once we drop all the item handles
-    ASSERT_NO_THROW(allocator.releaseSlab(poolId, 0 /* only one AC anyawys */,
-                                          SlabReleaseMode::kRebalance));
-
-    // We should still be able to access every single item and
-    // they should still be unevictable and the stats should still say
-    // we have `itemsPerSlab` of unevictable items
-    {
-      auto stats = allocator.getPoolStats(poolId);
-      ASSERT_EQ(itemsPerSlab, stats.numUnevictableItems());
-      ASSERT_EQ(0, stats.numEvictableItems());
-    }
-    for (unsigned int i = 0; i < itemsPerSlab; ++i) {
-      auto key = "unevictable_" + folly::to<std::string>(i);
-      auto handle = allocator.find(key);
-      ASSERT_NE(nullptr, handle);
-      ASSERT_TRUE(handle->isUnevictable());
-    }
   }
 
   void testBasicFreeMemStrategy() {
@@ -4709,7 +4543,14 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
 
     // Restoring a saved cache allocator from shared memroy
     {
-      config.enableResidentMemoryMonitor(std::chrono::seconds{2}, 1, 10, 1, 10);
+      MemoryMonitor::Config memConfig;
+      memConfig.mode = MemoryMonitor::ResidentMemory;
+      memConfig.maxAdvisePercentPerIter = 1;
+      memConfig.maxReclaimPercentPerIter = 1;
+      memConfig.maxAdvisePercent = 10;
+      memConfig.lowerLimitGB = 1;
+      memConfig.upperLimitGB = 10;
+      config.enableMemoryMonitor(std::chrono::seconds{2}, memConfig);
       AllocatorT alloc(config);
       ASSERT_TRUE(alloc.isOnShm());
     }
@@ -4832,11 +4673,9 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
                            folly::to<std::string>(i);
 
           typename AllocatorT::ItemHandle itemHandle;
-          if (i % 2 == 0) {
-            itemHandle = alloc.allocatePermanent_deprecated(pid, key, sizes[0]);
-          } else {
-            itemHandle = alloc.allocate(pid, key, sizes[0]);
-          }
+
+          itemHandle = alloc.allocate(pid, key, sizes[0]);
+
           uint8_t* parentBuf =
               reinterpret_cast<uint8_t*>(itemHandle->getWritableMemory());
           (*parentBuf) = static_cast<uint8_t>(i);
@@ -5260,50 +5099,6 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     }
   }
 
-  // Test stats count on permanent allocation is correct
-  // 1. Alloc and insert permanent items
-  // 2. Alloc and REMOVE permanent items
-  void testAllocPermanentCount() {
-    const int numSlabs = 2;
-    const size_t kItemSize = 100;
-    const size_t nItems = 10;
-
-    typename AllocatorT::MMConfig mmConfig;
-    mmConfig.lruRefreshTime = 0;
-
-    typename AllocatorT::Config config;
-    config.disableCacheEviction();
-    config.setCacheSize(numSlabs * Slab::kSize);
-    // Disable slab rebalancing
-    config.enablePoolRebalancing(nullptr, std::chrono::seconds{0});
-    AllocatorT allocator(config);
-
-    // 1. Allocate some permanent items
-    const size_t numBytes = allocator.getCacheMemoryStats().cacheSize;
-    auto poolId = allocator.addPool("default", numBytes, {}, mmConfig);
-    std::vector<typename AllocatorT::ItemHandle> handles;
-    for (unsigned int i = 0; i < nItems; ++i) {
-      ASSERT_EQ(allocator.getGlobalCacheStats().numPermanentItems, i);
-      auto handle = allocator.allocatePermanent_deprecated(
-          poolId, folly::to<std::string>(i), kItemSize);
-      ASSERT_NE(nullptr, handle);
-      ASSERT_TRUE(handle->isUnevictable());
-      allocator.insert(handle);
-      ASSERT_TRUE(findItem(true, allocator, handle.get()));
-      handles.push_back(std::move(handle));
-    }
-
-    // 2. Allocte and remove
-    for (unsigned int i = 0; i < 2 * nItems; ++i) {
-      auto handle = allocator.allocatePermanent_deprecated(
-          poolId, folly::to<std::string>(i), kItemSize);
-      ASSERT_EQ(allocator.getGlobalCacheStats().numPermanentItems, nItems + 1);
-      allocator.remove(handle->getKey());
-      handle.reset();
-    }
-    ASSERT_EQ(allocator.getGlobalCacheStats().numPermanentItems, nItems);
-  }
-
   // Test stats on counting chained items
   // 1. Alloc an item and several chained items
   //    * Before inserting chained items, make sure count is zero
@@ -5389,8 +5184,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     }
   }
 
-  // Test stats count on permanent and chained items across multiple threads.
-  // Add peremanent and chained items with multiple threads
+  // Test stats count on chained items across multiple threads.
   void testCountItemsMultithread() {
     // create an allocator worth 10 slabs.
     typename AllocatorT::Config config;
@@ -5403,21 +5197,7 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     const auto poolSize = numBytes;
 
     const auto pid = alloc.addPool("one", poolSize);
-
-    // Thread to allocate permanent items
-    int perICount = 37;
     int itemSize = 100;
-    auto addFn = [&](std::string keyPrefix) {
-      for (int j = 0; j < perICount; j++) {
-        auto handle = alloc.allocatePermanent_deprecated(
-            pid, keyPrefix + folly::to<std::string>(j), itemSize);
-        ASSERT_NE(nullptr, handle);
-        ASSERT_TRUE(handle->isUnevictable());
-        alloc.insert(handle);
-        ASSERT_TRUE(findItem(true, alloc, handle.get()));
-      }
-    };
-
     // Thread to allocate chained child items
     int childCount = 17;
     auto addChild = [&] {
@@ -5428,19 +5208,6 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
         alloc.addChainedItem(itemHandle, std::move(childItem));
       }
     };
-
-    // -- Permanent Test --
-    // Run once
-    addFn("first");
-
-    // Add more in two threads
-    auto t1 = std::async(std::launch::async, addFn, std::string("hello"));
-    auto t2 = std::async(std::launch::async, addFn, std::string("world"));
-    t1.wait();
-    t2.wait();
-
-    ASSERT_EQ(perICount * 3, alloc.getGlobalCacheStats().numPermanentItems);
-
     // -- Chained Test --
     util::allocateAccessible(alloc, pid, "parent", 100);
     auto tc1 = std::async(std::launch::async, addChild);
@@ -5452,13 +5219,11 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     ASSERT_EQ(childCount * 2, alloc.getGlobalCacheStats().numChainedChildItems);
   }
 
-  // Test permanent and chained item count consistency after shutdown and
-  // restore
+  // Test chained item count consistency after shutdown and restore
   void testItemCountCreationTime() {
     typename AllocatorT::Config config;
     uint8_t poolId;
     config.setCacheSize(2 * Slab::kSize);
-    auto pItemCount = 5;
     auto ccItemCount = 7;
     config.configureChainedItems();
     config.enableCachePersistence(this->cacheDir_);
@@ -5472,16 +5237,6 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       AllocatorT alloc(AllocatorT::SharedMemNew, config);
       const size_t numBytes = alloc.getCacheMemoryStats().cacheSize;
       poolId = alloc.addPool("foobar", numBytes);
-
-      // Allocate permanent items
-      for (int i = 0; i < pItemCount; i++) {
-        auto handle = alloc.allocatePermanent_deprecated(
-            poolId, folly::to<std::string>(i), 10);
-        ASSERT_NE(nullptr, handle);
-        ASSERT_TRUE(handle->isUnevictable());
-        alloc.insert(handle);
-        ASSERT_TRUE(findItem(true, alloc, handle.get()));
-      }
 
       // Allocate chained items
       {
@@ -5502,7 +5257,6 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
     // Restore lru allocator, check count
     {
       AllocatorT alloc(AllocatorT::SharedMemAttach, config);
-      ASSERT_EQ(pItemCount, alloc.getGlobalCacheStats().numPermanentItems);
       ASSERT_EQ(1, alloc.getGlobalCacheStats().numChainedParentItems);
       ASSERT_EQ(ccItemCount, alloc.getGlobalCacheStats().numChainedChildItems);
       alloc.shutDown();
@@ -5510,7 +5264,6 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
 
     // create new and ensure that the count is reset
     AllocatorT alloc(AllocatorT::SharedMemNew, config);
-    ASSERT_NE(pItemCount, alloc.getGlobalCacheStats().numPermanentItems);
     ASSERT_NE(1, alloc.getGlobalCacheStats().numChainedParentItems);
     ASSERT_NE(ccItemCount, alloc.getGlobalCacheStats().numChainedChildItems);
   }
@@ -5641,108 +5394,6 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       ASSERT_TRUE(insertedNew2->hasChainedItem());
       ASSERT_EQ(insertedNew2, alloc.find("hello2"));
     }
-  }
-
-  void testPermanentItems() {
-    typename AllocatorT::Config config;
-    config.setCacheSize(10 * Slab::kSize);
-    config.configureChainedItems();
-    // Disable slab rebalancing
-    config.enablePoolRebalancing(nullptr, std::chrono::seconds{0});
-
-    AllocatorT alloc(config);
-    const auto poolId =
-        alloc.addPool("default", alloc.getCacheMemoryStats().cacheSize);
-
-    auto getNumPermanentItems = [&] {
-      const auto stats = alloc.getGlobalCacheStats();
-      return stats.numPermanentItems;
-    };
-
-    {
-      auto parent =
-          alloc.allocatePermanent_deprecated(poolId, "permanent", 10000);
-      for (unsigned int i = 0; i < 10; ++i) {
-        auto c = alloc.allocateChainedItem(parent, 10000);
-        ASSERT_NE(nullptr, c);
-        alloc.addChainedItem(parent, std::move(c));
-      }
-      ASSERT_TRUE(alloc.insert(parent));
-    }
-    ASSERT_EQ(11, getNumPermanentItems());
-
-    // Allocating and freeing a normal parent + chained items should
-    // not affect permanentItem count
-    auto parent4 = alloc.allocate(poolId, "normal", 10000);
-    for (unsigned int i = 0; i < 10; ++i) {
-      auto c = alloc.allocateChainedItem(parent4, 10000);
-      ASSERT_NE(nullptr, c);
-      alloc.addChainedItem(parent4, std::move(c));
-    }
-    ASSERT_EQ(11, getNumPermanentItems());
-    parent4.reset();
-    ASSERT_EQ(11, getNumPermanentItems());
-
-    // keep allocating until we're full
-    std::vector<typename AllocatorT::ItemHandle> handles;
-    for (uint64_t i = 0;; ++i) {
-      auto it =
-          util::allocateAccessible(alloc, poolId, util::castToKey(i), 10000);
-      if (!it) {
-        break;
-      }
-      handles.push_back(std::move(it));
-    }
-    ASSERT_FALSE(handles.empty());
-
-    // Trigger 2 * numKeys evictions
-    const auto numKeys = handles.size();
-    handles.clear();
-    for (uint64_t i = numKeys; i < numKeys * 3; ++i) {
-      auto it =
-          util::allocateAccessible(alloc, poolId, util::castToKey(i), 10000);
-      ASSERT_NE(nullptr, it);
-    }
-    ASSERT_EQ(11, getNumPermanentItems());
-
-    // Verify permanent item and its children are still intact
-    auto parent = alloc.find("permanent");
-    {
-      auto allocs = alloc.viewAsChainedAllocs(parent);
-      ASSERT_EQ(allocs.computeChainLength(), 10);
-    }
-
-    // Replace with another permanet parnet is fine
-    auto parent2 =
-        alloc.allocatePermanent_deprecated(poolId, "permanent", 10000);
-    ASSERT_NE(nullptr, parent2);
-    ASSERT_NO_THROW(alloc.transferChainAndReplace(parent, parent2));
-    ASSERT_FALSE(parent->hasChainedItem());
-    ASSERT_EQ(12, getNumPermanentItems());
-
-    parent.reset();
-    ASSERT_EQ(11, getNumPermanentItems());
-
-    // Throw if replacing with a normal parent
-    auto parent3 = alloc.allocate(poolId, "permanent", 10000);
-    ASSERT_NE(nullptr, parent3);
-    ASSERT_THROW(alloc.transferChainAndReplace(parent2, parent3),
-                 std::invalid_argument);
-    ASSERT_EQ(11, getNumPermanentItems());
-
-    parent3.reset();
-    ASSERT_EQ(11, getNumPermanentItems());
-
-    auto chainedItem = alloc.allocateChainedItem(parent2, 10000);
-    ASSERT_EQ(12, getNumPermanentItems());
-    chainedItem.reset();
-    ASSERT_EQ(11, getNumPermanentItems());
-
-    alloc.remove("permanent");
-    ASSERT_EQ(11, getNumPermanentItems());
-
-    parent2.reset();
-    ASSERT_EQ(0, getNumPermanentItems());
   }
 
   void testChainedItemIterator() {
@@ -6073,47 +5724,6 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       EXPECT_FALSE(util::isKeyValid(key));
       EXPECT_THROW(util::throwIfKeyInvalid(key), std::invalid_argument);
     }
-  }
-
-  // create a cache and access it through the offsets from the read only cache
-  // view. Writing to the read only view should fail even if we try to
-  // const_cast
-  void testReadOnlyCacheView() {
-    typename AllocatorT::Config config;
-
-    uint8_t poolId;
-    const size_t nSlabs = 20;
-    config.setCacheSize(nSlabs * Slab::kSize);
-    config.enableCachePersistence(this->cacheDir_);
-
-    size_t allocSize = 1024;
-    AllocatorT alloc(AllocatorT::SharedMemNew, config);
-    const size_t numBytes = alloc.getCacheMemoryStats().cacheSize;
-    poolId = alloc.addPool("foobar", numBytes);
-    auto hdl = util::allocateAccessible(alloc, poolId, "mykey", allocSize);
-    ASSERT_NE(hdl, nullptr);
-    unsigned char magicVal = 'f';
-    std::vector<char> v(hdl->getSize(), magicVal);
-    auto data = folly::StringPiece{v.data(), v.size()};
-    std::memcpy(hdl->getWritableMemory(), data.data(), data.size());
-    auto hdlSp = folly::StringPiece{
-        reinterpret_cast<const char*>(hdl->getMemory()), hdl->getSize()};
-    ASSERT_EQ(hdlSp, data);
-
-    auto offset = alloc.getItemPtrAsOffset(hdl->getMemory());
-
-    auto roCache = ReadOnlySharedCacheView(config.cacheDir, config.usePosixShm);
-
-    auto ptr = roCache.getItemPtrFromOffset(offset);
-    ASSERT_NE(reinterpret_cast<uintptr_t>(ptr),
-              reinterpret_cast<uintptr_t>(hdl->getMemory()));
-    auto roSp =
-        folly::StringPiece{reinterpret_cast<const char*>(ptr), allocSize};
-    ASSERT_EQ(data, roSp);
-
-    ASSERT_DEATH(std::memset(reinterpret_cast<char*>(const_cast<void*>(ptr)), 0,
-                             allocSize),
-                 ".*");
   }
 
   void testRebalanceByAllocFailure() {

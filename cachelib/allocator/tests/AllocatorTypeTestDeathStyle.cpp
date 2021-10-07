@@ -14,32 +14,24 @@
  * limitations under the License.
  */
 
-#pragma once
-
-#include <folly/dynamic.h>
-
-#include "cachelib/allocator/nvmcache/NavyConfig.h"
+#include "cachelib/allocator/tests/BaseAllocatorTestDeathStyle.h"
+#include "cachelib/allocator/tests/TestBase.h"
 
 namespace facebook {
 namespace cachelib {
 namespace tests {
-namespace utils {
-using NavyConfig = navy::NavyConfig;
-inline NavyConfig getNvmTestConfig(const std::string& cacheDir) {
-  NavyConfig config{};
-  config.setSimpleFile(cacheDir + "/navy", 100 * 1024ULL * 1024ULL);
-  config.setDeviceMetadataSize(4 * 1024 * 1024);
-  config.setBlockSize(1024);
-  config.setNavyReqOrderingShards(10);
-  config.blockCache().setRegionSize(4 * 1024 * 1024);
-  config.bigHash()
-      .setSizePctAndMaxItemSize(50, 100)
-      .setBucketSize(1024)
-      .setBucketBfSize(8);
-  return config;
-}
+TYPED_TEST_CASE(BaseAllocatorTestDeathStyle, AllocatorTypes);
 
-} // namespace utils
+TYPED_TEST(BaseAllocatorTestDeathStyle, ReadOnlyCacheView) {
+  this->testReadOnlyCacheView();
+}
 } // namespace tests
 } // namespace cachelib
 } // namespace facebook
+
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  // Use thread-safe mode for all tests that use ASSERT_DEATH
+  ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+  return RUN_ALL_TESTS();
+}

@@ -248,15 +248,9 @@ void CacheAllocator<CacheTrait>::initWorkers() {
           "supported "
           "for cache on a shared memory segment only.");
     }
-    startNewMemMonitor(config_.memMonitorMode, config_.memMonitorInterval,
-                       (config_.memAdvisePercentPerIter
-                            ? config_.memAdvisePercentPerIter
-                            : config_.memAdviseReclaimPercentPerIter),
-                       (config_.memReclaimPercentPerIter
-                            ? config_.memReclaimPercentPerIter
-                            : config_.memAdviseReclaimPercentPerIter),
-                       config_.memLowerLimitGB, config_.memUpperLimitGB,
-                       config_.memMaxAdvisePercent, config_.poolAdviseStrategy);
+    startNewMemMonitor(config_.memMonitorInterval,
+                       config_.memMonitorConfig,
+                       config_.poolAdviseStrategy);
   }
 
   if (config_.itemsReaperEnabled()) {
@@ -306,9 +300,6 @@ CacheAllocator<CacheTrait>::allocatePermanent_deprecated(PoolId poolId,
   }
   auto item = allocateInternal(poolId, key, size, util::getCurrentTimeSec(),
                                0 /* ttlSecs */, true /* unevictable */);
-  if (item) {
-    stats_.numPermanentItems.inc();
-  }
   return item;
 }
 
@@ -319,7 +310,7 @@ CacheAllocator<CacheTrait>::allocateInternal(PoolId pid,
                                              uint32_t size,
                                              uint32_t creationTime,
                                              uint32_t expiryTime,
-                                             bool unevictable) {
+                                             bool /*unevictable*/) {
   util::LatencyTracker tracker{stats().allocateLatency_};
 
   SCOPE_FAIL { stats_.invalidAllocs.inc(); };
@@ -353,9 +344,6 @@ CacheAllocator<CacheTrait>::allocateInternal(PoolId pid,
       handle.markNascent();
       (*stats_.fragmentationSize)[pid][cid].add(
           util::getFragmentation(*this, *handle));
-      if (unevictable) {
-        handle->markUnevictable();
-      }
     }
 
   } else { // failed to allocate memory.
@@ -386,9 +374,6 @@ CacheAllocator<CacheTrait>::allocateChainedItem(const ItemHandle& parent,
   }
 
   auto it = allocateChainedItemInternal(parent, size);
-  if (it && it->isUnevictable()) {
-    stats_.numPermanentItems.inc();
-  }
   if (auto eventTracker = getEventTracker()) {
     const auto result =
         it ? AllocatorApiResult::ALLOCATED : AllocatorApiResult::FAILED;
@@ -432,9 +417,6 @@ CacheAllocator<CacheTrait>::allocateChainedItemInternal(
     child.markNascent();
     (*stats_.fragmentationSize)[pid][cid].add(
         util::getFragmentation(*this, *child));
-    if (parent->isUnevictable()) {
-      child->markUnevictable();
-    }
   }
 
   return child;
@@ -584,11 +566,9 @@ void CacheAllocator<CacheTrait>::transferChainLocked(
 template <typename CacheTrait>
 void CacheAllocator<CacheTrait>::transferChainAndReplace(
     const ItemHandle& parent, const ItemHandle& newParent) {
-  if (!parent || !newParent ||
-      (parent->isUnevictable() != newParent->isUnevictable())) {
+  if (!parent || !newParent) {
     throw std::invalid_argument("invalid parent or new parent");
   }
-
   { // scope for chained item lock
     auto l = chainedItemLocks_.lockExclusive(parent->getKey());
     transferChainLocked(parent, newParent);
@@ -761,9 +741,7 @@ CacheAllocator<CacheTrait>::releaseBackToAllocator(Item& it,
           folly::sformat("Can not recycle a chained item {}, toRecyle",
                          it.toString(), toRecycle->toString()));
     }
-    if (it.isUnevictable()) {
-      stats_.numPermanentItems.dec();
-    }
+
     allocator_->free(&it);
     return ReleaseRes::kReleased;
   }
@@ -779,10 +757,6 @@ CacheAllocator<CacheTrait>::releaseBackToAllocator(Item& it,
   // Because this function cannot fail to release "it"
   ReleaseRes res =
       toRecycle == nullptr ? ReleaseRes::kReleased : ReleaseRes::kNotRecycled;
-
-  if (it.isUnevictable()) {
-    stats_.numPermanentItems.dec();
-  }
 
   // Free chained allocs if there are any
   if (it.hasChainedItem()) {
@@ -836,10 +810,6 @@ CacheAllocator<CacheTrait>::releaseBackToAllocator(Item& it,
               "chained item refcount is not zero. We cannot proceed! "
               "Ref: {}, Chained Item: {}",
               childRef, head->toString()));
-        }
-
-        if (head->isUnevictable()) {
-          stats_.numPermanentItems.dec();
         }
 
         // Item is not moving and refcount is 0, we can proceed to
@@ -1639,11 +1609,7 @@ typename CacheAllocator<CacheTrait>::MMContainer&
 CacheAllocator<CacheTrait>::getMMContainer(const Item& item) const {
   const auto allocInfo =
       allocator_->getAllocInfo(static_cast<const void*>(&item));
-  if (item.isUnevictable()) {
-    return getUnevictableMMContainer(allocInfo.poolId, allocInfo.classId);
-  } else {
-    return getEvictableMMContainer(allocInfo.poolId, allocInfo.classId);
-  }
+  return getEvictableMMContainer(allocInfo.poolId, allocInfo.classId);
 }
 
 template <typename CacheTrait>
@@ -1794,12 +1760,9 @@ void CacheAllocator<CacheTrait>::recordAccessInMMContainer(Item& item,
     ring_->trackItem(reinterpret_cast<uintptr_t>(&item), item.getSize());
   }
 
-  // Only record access for evictable items
-  if (LIKELY(item.isEvictable())) {
-    auto& mmContainer =
-        getEvictableMMContainer(allocInfo.poolId, allocInfo.classId);
-    mmContainer.recordAccess(item, mode);
-  }
+  auto& mmContainer =
+      getEvictableMMContainer(allocInfo.poolId, allocInfo.classId);
+  mmContainer.recordAccess(item, mode);
 }
 
 template <typename CacheTrait>
@@ -2207,7 +2170,6 @@ PoolStats CacheAllocator<CacheTrait>::getPoolStats(PoolId poolId) const {
   if (!isCompactCache) {
     for (const ClassId cid : classIds) {
       const auto& container = getEvictableMMContainer(poolId, cid);
-      const auto& unevictableContainer = getUnevictableMMContainer(poolId, cid);
       uint64_t classHits = (*stats_.cacheHits)[poolId][cid].get();
       cacheStats.insert(
           {cid,
@@ -2216,7 +2178,7 @@ PoolStats CacheAllocator<CacheTrait>::getPoolStats(PoolId poolId) const {
             (*stats_.fragmentationSize)[poolId][cid].get(), classHits,
             (*stats_.chainedItemEvictions)[poolId][cid].get(),
             (*stats_.regularItemEvictions)[poolId][cid].get(),
-            container.getStats(), unevictableContainer.getStats()}});
+            container.getStats()}});
       totalHits += classHits;
     }
   }
@@ -2384,18 +2346,12 @@ bool CacheAllocator<CacheTrait>::moveForSlabRelease(
     return false;
   }
 
-  // If evictions are disabled globally for cache or if the old item is a
-  // permanent item, we try moving for an unlimited number of times, because
-  // we cannot evict.
-  const bool unlimitedMovingTries =
-      config_.disableEviction || oldItem.isUnevictable();
-
   bool isMoved = false;
   auto startTime = util::getCurrentTimeSec();
   ItemHandle newItemHdl = allocateNewItemForOldItem(oldItem);
 
   for (unsigned int itemMovingAttempts = 0;
-       unlimitedMovingTries || itemMovingAttempts < config_.movingTries;
+       itemMovingAttempts < config_.movingTries;
        ++itemMovingAttempts) {
     stats_.numMoveAttempts.inc();
 
@@ -2516,13 +2472,12 @@ CacheAllocator<CacheTrait>::allocateNewItemForOldItem(const Item& oldItem) {
 
   // Set up the destination for the move. Since oldItem would have the moving
   // bit set, it won't be picked for eviction.
-  const bool isUnevictable = oldItem.isUnevictable();
   auto newItemHdl = allocateInternal(allocInfo.poolId,
                                      oldItem.getKey(),
                                      oldItem.getSize(),
                                      oldItem.getCreationTime(),
                                      oldItem.getExpiryTime(),
-                                     isUnevictable);
+                                     false);
   if (!newItemHdl) {
     return {};
   }
@@ -2655,7 +2610,6 @@ void CacheAllocator<CacheTrait>::evictForSlabRelease(
 template <typename CacheTrait>
 typename CacheAllocator<CacheTrait>::ItemHandle
 CacheAllocator<CacheTrait>::evictNormalItemForSlabRelease(Item& item) {
-  XDCHECK(item.isEvictable());
   XDCHECK(item.isMoving());
 
   if (item.isOnlyMoving()) {
@@ -2694,7 +2648,6 @@ CacheAllocator<CacheTrait>::evictNormalItemForSlabRelease(Item& item) {
 template <typename CacheTrait>
 typename CacheAllocator<CacheTrait>::ItemHandle
 CacheAllocator<CacheTrait>::evictChainedItemForSlabRelease(ChainedItem& child) {
-  XDCHECK(child.isEvictable());
   XDCHECK(child.isMoving());
 
   // We have the child marked as moving, but dont know anything about the
@@ -2987,7 +2940,6 @@ folly::IOBufQueue CacheAllocator<CacheTrait>::saveStateToIOBuf() {
     }
   }
 
-  *metadata_.numPermanentItems_ref() = stats_.numPermanentItems.get();
   *metadata_.numChainedParentItems_ref() = stats_.numChainedParentItems.get();
   *metadata_.numChainedChildItems_ref() = stats_.numChainedChildItems.get();
   *metadata_.numAbortedSlabReleases_ref() = stats_.numAbortedSlabReleases.get();
@@ -3219,7 +3171,6 @@ void CacheAllocator<CacheTrait>::initStats() {
   }
 
   // deserialize item counter stats
-  stats_.numPermanentItems.set(*metadata_.numPermanentItems_ref());
   stats_.numChainedParentItems.set(*metadata_.numChainedParentItems_ref());
   stats_.numChainedChildItems.set(*metadata_.numChainedChildItems_ref());
   stats_.numAbortedSlabReleases.set(
@@ -3403,19 +3354,11 @@ bool CacheAllocator<CacheTrait>::startNewPoolOptimizer(
 }
 template <typename CacheTrait>
 bool CacheAllocator<CacheTrait>::startNewMemMonitor(
-    MemoryMonitor::Mode memMonitorMode,
     std::chrono::milliseconds interval,
-    unsigned int memAdvisePercentPerIter,
-    unsigned int memReclaimPercentPerIter,
-    unsigned int memLowerLimitGB,
-    unsigned int memUpperLimitGB,
-    unsigned int memMaxAdvisePercent,
+    MemoryMonitor::Config config,
     std::shared_ptr<RebalanceStrategy> strategy) {
-  memMonitorMaxAdvisedPct_ = memMaxAdvisePercent;
-  return startNewWorker("MemoryMonitor", memMonitor_, interval, memMonitorMode,
-                        memAdvisePercentPerIter, memReclaimPercentPerIter,
-                        memLowerLimitGB, memUpperLimitGB, memMaxAdvisePercent,
-                        strategy);
+  return startNewWorker("MemoryMonitor", memMonitor_, interval,
+                        std::move(config), strategy);
 }
 template <typename CacheTrait>
 bool CacheAllocator<CacheTrait>::startNewReaper(

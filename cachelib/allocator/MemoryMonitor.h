@@ -31,6 +31,44 @@ template <typename AllocatorT>
 class AllocatorResizeTest;
 }
 
+// A utility to track rate of increase/decrease of values over a window of time
+// and use it to throttle specified value at the same rate. This means if the
+// rate of change in values over the window exceeds the specified value, the
+// rate limiter throttles it down to 0, otherwise the value is reduced
+// proportionally and not throttled at all when rate of change drops to 0.
+class RateLimiter {
+ public:
+  // @param detectIncrease  Detect rate of increase if true, decrease otherwise
+  explicit RateLimiter(bool detectIncrease);
+
+  // Update window size
+  // @param windowSize      The window size in terms of the number of values to
+  //                        track for rate limiting
+  void setWindowSize(size_t windowSize) { windowSize_ = windowSize + 1; }
+
+  // specify a new sample value
+  // @param value Sample value
+  void addValue(int64_t value);
+
+  // throttle down the proposed change in value based on current rate of change
+  // @param value Value to throttle
+  // @return throttled value
+  size_t throttle(int64_t delta);
+
+ private:
+  // List of values over the window for rate of change calculation
+  std::list<int64_t> values_;
+
+  // Whether to detect an increase or decrease
+  bool detectIncrease_{true};
+
+  // Number of values to track for the window
+  size_t windowSize_{0};
+
+  // Current rate of increase/decrease.
+  int64_t rateOfChange_{0};
+};
+
 // The goal of memory monitoring is to avoid an out-of-memory (OOM) situation,
 // either by ensuring there's enough free memory available on the system or
 // that the caching process does not exceed a given memory usage limit.
@@ -40,6 +78,51 @@ class AllocatorResizeTest;
 class MemoryMonitor : public PeriodicWorker {
  public:
   enum Mode { FreeMemory, ResidentMemory, TestMode, Disabled };
+
+  struct Config {
+    // Memory monitoring mode. Enable memory monitoring by setting this to
+    // MemoryMonitor::ResidentMemory or MemoryMonitor::FreeMemory mode.
+    Mode mode{Mode::Disabled};
+    // percentage of memUpperLimit - memLowerLimit to be advised away
+    // in an iteration.
+    size_t maxAdvisePercentPerIter{5};
+    // percentage of memUpperLimit - memLowerLimit to be reclaimed for
+    // cache in an iteration.
+    size_t maxReclaimPercentPerIter{5};
+    // lower limit for free/resident memory in GBs.
+    // Note: the lower/upper limit is used in exactly opposite ways for the
+    // FreeMemory versus ResidentMemory mode.
+    // 1. In the ResidentMemory mode, when the resident memory usage drops
+    // below this limit, advised away slabs are reclaimed in proportion to
+    // the size of pools, to increase cache size and raise resident memory
+    // above this limit.
+    // 2. In the FreeMemory mode, when the system free memory drops below this
+    // limit, slabs are advised away from pools in proportion to their size to
+    // raise system free memory above this limit.
+    size_t lowerLimitGB{10};
+    // upper limit for free/resident memory in GBs.
+    // Note: the lower/upper limit is used in exactly opposite ways for the
+    // FreeMemory versus ResidentMemory mode.
+    // 1. In the ResidentMemory mode, when the resident memory usage exceeds
+    // this limit, slabs are advised away from pools in proportion to their
+    // size to reduce resident memory usage below this limit.
+    // 2. In the FreeMemory mode, when the system free memory exceeds
+    // this limit and if there are slabs that were advised away earlier,
+    // they're reclaimed by pools in proportion to their sizes to reduce the
+    // system free memory below this limit.
+    size_t upperLimitGB{15};
+    // maximum percentage of item cache that can be advised away
+    size_t maxAdvisePercent{20};
+    // On restart, the heap usage for applications grows slowly to steady state
+    // over time. Memory monitoring may reclaim advised memory leaving
+    // application vulnerable to OOMs due rapid growth in heap usage.
+    // Cachelib supports rate limiting reclaiming of advised memory to avoid OOM
+    // This is enabled by setting tracking window size to a non-zero value.
+    // Setting this config to a value > 0 enables rate limiting reclaiming of
+    // advised memory by the amount by which free/resident memory is
+    // decreasing/increasing
+    std::chrono::seconds reclaimRateLimitWindowSecs{0};
+  };
 
   // Memory monitoring can be setup to run in one of the two following modes:
   //
@@ -82,6 +165,11 @@ class MemoryMonitor : public PeriodicWorker {
   //                             leading to a probable OOM.
   // @param strategy             Strategy to use to determine the allocation
   //                             class in pool to steal slabs from, for advising
+  // @param reclaimRateLimitWindowSecs
+  //                             Specifies window in seconds over which
+  //                             free memory values are tracked to detect
+  //                             decreasing free memory values. Setting this to
+  //                             non-zero value enables rate limiting reclaim.
   //
   // 2. Resident Memory Monitoring
   //
@@ -96,33 +184,12 @@ class MemoryMonitor : public PeriodicWorker {
   // away), until the resident memory usage is above the lowerLimitGB,
   // percentReclaimPerIteration of (upperLimitGB - lowerLimitGB) at a time.
   //
-  // @param mode                 ResidentMemory
-  // @param cache
-  // @param percentAdvisePerIteration
-  //                             Percentage of upperLimitGB-lowerLimitGB to be
-  //                             advised every poll period. This
-  //                             governs the rate of advise
-  // @param percentReclaimPerIteration
-  //                             Percentage of upperLimitGB-lowerLimitGB to be
-  //                             reclaimed every poll period. This
-  //                             governs the rate of reclaim
-  // @param lowerLimitGB         The lower limit of resident memory in GBytes
-  //                             that triggers reclaiming of previously advised
-  //                             away of memory from cache
-  // @param upperLimitGB         The upper limit of resident memory in GBytes
-  //                             that triggers advising of memory from cache
-  // @param maxLimitPercent      Maximum percentage of item cache limit that can
-  //                             be advised away before advising is disabled
-  //                             leading to a probable OOM.
+  // @param cache                Cachelib instance
+  // @param config               Memory monitor config
   // @param strategy             Strategy to use to determine the allocation
   //                             class in pool to steal slabs from, for advising
   MemoryMonitor(CacheBase& cache,
-                Mode mode,
-                size_t percentAdvisePerIteration,
-                size_t percentReclaimPerIteration,
-                size_t lowerLimitGB,
-                size_t upperLimitGB,
-                size_t maxLimitPercent,
+                Config config,
                 std::shared_ptr<RebalanceStrategy> strategy);
 
   ~MemoryMonitor() override;
@@ -231,6 +298,19 @@ class MemoryMonitor : public PeriodicWorker {
   // the maximum percentage of total memory that can be advised away
   size_t maxLimitPercent_{0};
 
+  // Specifies window in seconds over which resident memory values are tracked
+  // to detect increasing resident memory values. Setting this to non-zero
+  // value enables rate limiting reclaim
+  std::chrono::seconds reclaimRateLimitWindowSecs_;
+
+  // On restart, the heap usage for applications grows slowly to steady state
+  // over time. Memory monitoring may reclaim advised memory leaving application
+  // vulnerable to OOMs due rapid growth in heap usage.
+  // Cachelib supports rate limiting reclaiming of advised memory to avoid OOM
+  // where the rate of reclaim is reduced by rate of free/resident memory
+  // decrease/increase.
+  RateLimiter rateLimiter_;
+
   // a count of total number of slabs advised away
   std::atomic<unsigned int> slabsAdvised_{0};
 
@@ -249,5 +329,6 @@ class MemoryMonitor : public PeriodicWorker {
   // updating the stats
   void work() final;
 };
+
 } // namespace cachelib
 } // namespace facebook
