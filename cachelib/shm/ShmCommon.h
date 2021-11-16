@@ -40,7 +40,6 @@ enum PageSizeT {
 
 constexpr int kInvalidFD = -1;
 
-// TODO(SHM_FILE): maybe we could use this inside the Tier Config class?
 struct FileShmSegmentOpts {
   FileShmSegmentOpts(std::string path = ""): path(path) {}
   std::string path;
@@ -57,7 +56,8 @@ struct ShmSegmentOpts {
   PageSizeT pageSize{PageSizeT::NORMAL};
   bool readOnly{false};
   size_t alignment{1}; // alignment for mapping.
-  ShmTypeOpts typeOpts{}; // opts specific to segment type
+  // opts specific to segment type
+  ShmTypeOpts typeOpts{PosixSysVSegmentOpts(false)};
 
   explicit ShmSegmentOpts(PageSizeT p) : pageSize(p) {}
   explicit ShmSegmentOpts(PageSizeT p, bool ro) : pageSize(p), readOnly(ro) {}
