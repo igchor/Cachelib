@@ -21,6 +21,8 @@
 #include <folly/ScopeGuard.h>
 #include <folly/logging/xlog.h>
 #include <folly/synchronization/SanitizeThread.h>
+#include <folly/hash/Hash.h>
+#include <folly/container/F14Map.h>
 
 #include <functional>
 #include <memory>
@@ -1281,7 +1283,8 @@ class CacheAllocator : public CacheBase {
   //
   // @return true  If the move was completed, and the containers were updated
   //               successfully.
-  bool moveRegularItemOnEviction(Item& oldItem, ItemHandle& newItemHdl);
+  template <typename ItemPtr>
+  ItemHandle moveRegularItemOnEviction(ItemPtr& oldItem, ItemHandle& newItemHdl);
 
   // Moves a regular item to a different slab. This should only be used during
   // slab release after the item's moving bit has been set. The user supplied
@@ -1361,6 +1364,10 @@ class CacheAllocator : public CacheBase {
   //         false  if the item is not in MMContainer
   bool removeFromMMContainer(Item& item);
 
+  using EvictionIterator = typename MMContainer::Iterator;
+
+  ItemHandle acquire(EvictionIterator& it) { return acquire(it.get()); }
+
   // Replaces an item in the MMContainer with another item, at the same
   // position.
   //
@@ -1371,6 +1378,8 @@ class CacheAllocator : public CacheBase {
   //               destination item did not exist in the container, or if the
   //               source item already existed.
   bool replaceInMMContainer(Item& oldItem, Item& newItem);
+  bool replaceInMMContainer(Item* oldItem, Item& newItem);
+  bool replaceInMMContainer(EvictionIterator& oldItemIt, Item& newItem);
 
   // Replaces an item in the MMContainer with another item, at the same
   // position. Or, if the two chained items belong to two different MM
@@ -1427,8 +1436,6 @@ class CacheAllocator : public CacheBase {
   // @return An evicted item or nullptr  if there is no suitable candidate.
   Item* findEviction(TierId tid, PoolId pid, ClassId cid);
 
-  using EvictionIterator = typename MMContainer::Iterator;
-
   // Advance the current iterator and try to evict a regular item
   //
   // @param  mmContainer  the container to look for evictions.
@@ -1450,11 +1457,22 @@ class CacheAllocator : public CacheBase {
 
   // Try to move the item down to the next memory tier
   //
+  // @param tid current tier ID of the item
+  // @param pid the pool ID the item belong to.
+  // @param item the item to evict
+  //
+  // @return valid handle to the item. This will be the last
+  //         handle to the item. On failure an empty handle.
+  template <typename ItemPtr>
+  ItemHandle tryEvictToNextMemoryTier(TierId tid, PoolId pid, ItemPtr& item);
+
+  // Try to move the item down to the next memory tier
+  //
   // @param item the item to evict
   //
   // @return valid handle to the item. This will be the last
   //         handle to the item. On failure an empty handle. 
-  ItemHandle tryEvictToNextMemoryTier(TierId tid, PoolId pid, Item& item);
+  ItemHandle tryEvictToNextMemoryTier(Item* item);
 
   // Deserializer CacheAllocatorMetadata and verify the version
   //
@@ -1758,6 +1776,84 @@ class CacheAllocator : public CacheBase {
     return 0;
   }
 
+  bool addWaitContextForMovingItem(
+      folly::StringPiece key, std::shared_ptr<WaitContext<ItemHandle>> waiter);
+
+  class MoveCtx {
+   public:
+    MoveCtx() {}
+
+    ~MoveCtx() {
+      // prevent any further enqueue to waiters
+      // Note: we don't need to hold locks since no one can enqueue
+      // after this point.
+      wakeUpWaiters();
+    }
+
+    // record the item handle. Upon destruction we will wake up the waiters
+    // and pass a clone of the handle to the callBack. By default we pass
+    // a null handle
+    void setItemHandle(ItemHandle _it) { it = std::move(_it); }
+
+    // enqueue a waiter into the waiter list
+    // @param  waiter       WaitContext
+    void addWaiter(std::shared_ptr<WaitContext<ItemHandle>> waiter) {
+      XDCHECK(waiter);
+      waiters.push_back(std::move(waiter));
+    }
+
+   private:
+    // notify all pending waiters that are waiting for the fetch.
+    void wakeUpWaiters() {
+      bool refcountOverflowed = false;
+      for (auto& w : waiters) {
+        // If refcount overflowed earlier, then we will return miss to
+        // all subsequent waitors.
+        if (refcountOverflowed) {
+          w->set(ItemHandle{});
+          continue;
+        }
+
+        try {
+          w->set(it.clone());
+        } catch (const exception::RefcountOverflow&) {
+          // We'll return a miss to the user's pending read,
+          // so we should enqueue a delete via NvmCache.
+          // TODO: cache.remove(it);
+          refcountOverflowed = true;
+        }
+      }
+    }
+
+    ItemHandle it; // will be set when Context is being filled
+    std::vector<std::shared_ptr<WaitContext<ItemHandle>>> waiters; // list of
+                                                                   // waiters
+  };
+  using MoveMap =
+      folly::F14ValueMap<folly::StringPiece,
+                         std::unique_ptr<MoveCtx>,
+                         folly::HeterogeneousAccessHash<folly::StringPiece>>;
+
+  static size_t getShardForKey(folly::StringPiece key) {
+    return folly::Hash()(key) % kShards;
+  }
+
+  MoveMap& getMoveMapForShard(size_t shard) {
+    return movesMap_[shard].movesMap_;
+  }
+
+  MoveMap& getMoveMap(folly::StringPiece key) {
+    return getMoveMapForShard(getShardForKey(key));
+  }
+
+  std::unique_lock<std::mutex> getMoveLockForShard(size_t shard) {
+    return std::unique_lock<std::mutex>(moveLock_[shard].moveLock_);
+  }
+
+  std::unique_lock<std::mutex> getMoveLock(folly::StringPiece key) {
+    return getMoveLockForShard(getShardForKey(key));
+  }
+
   // Whether the memory allocator for this cache allocator was created on shared
   // memory. The hash table, chained item hash table etc is also created on
   // shared memory except for temporary shared memory mode when they're created
@@ -1852,6 +1948,22 @@ class CacheAllocator : public CacheBase {
   // mutex protecting the creation and destruction of workers poolRebalancer_,
   // poolResizer_, poolOptimizer_, memMonitor_, reaper_
   mutable std::mutex workersMutex_;
+
+  static constexpr size_t kShards = 8192; // TODO: need to define right value
+
+  struct MovesMapShard {
+    alignas(folly::hardware_destructive_interference_size) MoveMap movesMap_;
+  };
+
+  struct MoveLock {
+    alignas(folly::hardware_destructive_interference_size) std::mutex moveLock_;
+  };
+
+  // a map of all pending moves
+  std::vector<MovesMapShard> movesMap_;
+
+  // a map of move locks for each shard
+  std::vector<MoveLock> moveLock_;
 
   // time when the ram cache was first created
   const time_t cacheCreationTime_{0};
