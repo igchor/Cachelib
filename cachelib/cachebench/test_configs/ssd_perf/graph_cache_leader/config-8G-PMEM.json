@@ -1,10 +1,17 @@
 {
   "cache_config": {
-    "cacheSizeMB": 4096,
+    "cacheSizeMB": 8192,
     "usePosixShm": true,
     "persistedCacheDir": "/tmp/mem-tier",
+    "memoryTiers" : [
+      {
+        "ratio": 1,
+        "file": "/mnt/tmpfs_pmem/memory-mapped-tier"
+      }
+    ],
     "navyReaderThreads": 32,
     "navyWriterThreads": 32,
+    "nvmCachePaths": ["/dev/md0"],
     "navyBigHashBucketSize": 4096,
     "navyBigHashSizePct": 65,
     "navyBlockSize": 4096,
