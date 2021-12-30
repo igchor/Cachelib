@@ -388,6 +388,8 @@ TYPED_TEST(BaseAllocatorTest, RebalanceWakeupAfterAllocFailure) {
 
 TYPED_TEST(BaseAllocatorTest, Nascent) { this->testNascent(); }
 
+TYPED_TEST(BaseAllocatorTest, BasicMultiTier) {this->testBasicMultiTier(); }
+
 namespace { // the tests that cannot be done by TYPED_TEST.
 
 using LruAllocatorTest = BaseAllocatorTest<LruAllocator>;
